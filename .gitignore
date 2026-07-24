@@ -1,0 +1,16 @@
+# macOS Finder metadata (local view state — never relevant to the repo)
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# macOS thumbnails / attribute files
+._*
+
+# Editor / IDE
+.vscode/
+.idea/
+*.swp
+
+# Env / secrets (never commit credentials)
+.env
+*.pem
