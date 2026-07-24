@@ -99,6 +99,115 @@ docker run --rm --name hello -p 8080:80 \
 
 ---
 
+## Testing an image locally — checklist
+
+```bash
+# ── Set once per session (edit these two) ──────────────────
+REGISTRY=840282986436.dkr.ecr.us-east-1.amazonaws.com
+IMAGE=hello-nginx:latest          # or hello-nginx@sha256:<digest>
+
+# 1. Clear the port — stop any container still holding 8080
+docker ps                          # look for 0.0.0.0:8080->80
+docker stop hello 2>/dev/null      # ignore error if nothing's running
+
+# 2. Authenticate to ECR (token lasts 12h; re-run is harmless)
+aws ecr get-login-password --region us-east-1 \
+  | docker login --username AWS --password-stdin $REGISTRY
+
+# 3. Pull to defeat the stale-tag cache  ← skip only if using @sha256
+docker pull $REGISTRY/$IMAGE
+
+# 4. Run — --rm = auto-delete on stop, --name = predictable handle
+docker run --rm --name hello -p 8080:80 $REGISTRY/$IMAGE
+
+# 5. Test → open http://localhost:8080
+
+# 6. Stop (from another terminal) — container self-deletes thanks to --rm
+docker stop hello
+```
+
+| Flag | Does | If you omit it |
+|------|------|----------------|
+| `--rm` | Deletes container when it stops | Dead containers pile up; clean with `docker rm` |
+| `--name hello` | Fixed name for `docker stop` | Docker assigns a random name; you must look it up |
+| `-p 8080:80` | Maps localhost:8080 → container's port 80 | Container runs but is unreachable from the browser |
+| `-d` (optional) | Detached — frees your terminal | Runs in foreground; `Ctrl+C` stops it |
+
+> **Stale-tag trap:** a tag is a *local* cache pointer too, not just a remote one.
+> If your laptop already cached an older `latest`, `docker run :latest` reuses the
+> stale copy. Run `docker pull` first, or reference the image by `@sha256:<digest>`
+> (a digest is the content, so it can never be stale).
+
+### Stopping Docker itself (macOS)
+
+Docker Desktop runs the Linux daemon inside a VM, so there is no `systemctl`.
+Use the Docker Desktop CLI:
+
+```bash
+docker desktop stop       # gracefully stop the engine/VM (keeps the app ready)
+docker desktop start      # bring it back up
+docker desktop status     # running or stopped?
+osascript -e 'quit app "Docker"'   # fully quit the app (graceful)
+killall Docker            # force-kill — last resort if it's hung
+```
+
+---
+
+## Tagging experiment (Runs A–C)
+
+Goal: observe what happens to images and tags across repeated builds/pushes,
+using `deploy-ecr-tagged.yml` (tag chosen at run time).
+
+| Run | Edit | Tag pushed | Result in ECR |
+|-----|------|-----------|---------------|
+| A | — | `1.0` | `1.0` added alongside existing `latest` (clean coexistence) |
+| B | `V2` | `latest` | new digest takes `latest`; **old `latest` becomes an untagged orphan** |
+| C | `V3` | `1.1` | `1.1` added; **no new orphan** (new content got its own name) |
+
+**What it proves**
+
+- Editing content always produces a **new digest** (build captures the whole
+  artifact — even the base `nginx:alpine` moving underneath can change the digest).
+- **Re-pushing an existing tag** (`latest` in Run B) *moves the pointer* and
+  strands the previous image as an untagged orphan — not an overwrite, not a
+  duplicate tag.
+- **Using a new tag** (`1.1` in Run C) avoids orphans entirely → the case for
+  versioned/immutable tags over reusing `latest`.
+
+Watch it live with the digest-sorted `describe-images` command in the cheat-sheet
+above; the orphan shows up as `"tags": null`.
+
+---
+
+## Lifecycle policy (automated cleanup)
+
+Applied to `hello-nginx` so orphans clean themselves up — no manual sweeping:
+
+```bash
+aws ecr put-lifecycle-policy --repository-name hello-nginx --region us-east-1 \
+  --lifecycle-policy-text '{
+    "rules": [
+      {
+        "rulePriority": 1,
+        "description": "Expire untagged images older than 1 day",
+        "selection": {
+          "tagStatus": "untagged",
+          "countType": "sinceImagePushed",
+          "countUnit": "days",
+          "countNumber": 1
+        },
+        "action": { "type": "expire" }
+      }
+    ]
+  }'
+
+# View / remove the policy
+aws ecr get-lifecycle-policy    --repository-name hello-nginx --region us-east-1
+aws ecr delete-lifecycle-policy --repository-name hello-nginx --region us-east-1
+```
+
+---
+
 ## Key concepts
 
 - **Tag = pointer, digest = content.** A tag (`latest`, `1.1`) is a *mutable
